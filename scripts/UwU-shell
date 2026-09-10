@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+
+case "$1" in
+    launcher)
+        qs ipc call launcher toggle
+        ;;
+
+    *)
+        echo "Usage: $0 launcher"
+        exit 1
+        ;;
+esac
