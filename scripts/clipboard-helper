@@ -1,0 +1,855 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+ACTION="${1:-list}"
+VALUE="${2:-}"
+CONTENT_LIMIT=50
+
+CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}"
+CLIPBOARD_DATA_DIR="$CACHE_HOME/clipboard-data"
+PIN_FILE="$CLIPBOARD_DATA_DIR/clipboard-pins"
+PREVIEW_INDEX="$CLIPBOARD_DATA_DIR/clipboard-img"
+PREVIEW_DIR="$CLIPBOARD_DATA_DIR/img-cache"
+
+mkdir -p "$PREVIEW_DIR"
+touch "$PIN_FILE" "$PREVIEW_INDEX"
+
+WORK_DIR=""
+
+cleanup() {
+    if [[ -n "$WORK_DIR" && -d "$WORK_DIR" ]]; then
+        rm -rf -- "$WORK_DIR"
+    fi
+}
+
+trap cleanup EXIT
+
+cleanup_preview_cache() {
+    if ! find "$PREVIEW_DIR" -maxdepth 1 -type f -mmin +1440 -delete; then
+        printf 'Warning: Failed to clean expired clipboard previews.\n' >&2
+        return 1
+    fi
+}
+
+list_entries() {
+    local limit="${1:-10}"
+    local mode="${2:-all}"
+    local filter_value="${3:-}"
+    local range_end="${4:-}"
+    local database_file
+    local line=""
+    local entry_id
+    local content
+    local normalized_content
+    local normalized_filter
+    local entry_type
+    local total_entries
+    local display_count
+    local index
+    local pinned_id
+    local max_id=0
+    local entry_numeric
+    local range_start_id=0
+    local range_end_id=0
+    local preview_path
+    local escaped_path
+
+    local -a entry_ids=()
+    local -a entry_contents=()
+    local -a entry_types=()
+
+    local -A pinned_ids=()
+
+    cleanup_preview_cache || true
+    : > "$PREVIEW_INDEX"
+
+    if [[ "$mode" == "pin" ]]; then
+        while IFS= read -r pinned_id || [[ -n "$pinned_id" ]]; do
+            [[ "$pinned_id" =~ ^[0-9]+$ ]] || continue
+            pinned_ids["$pinned_id"]=1
+        done < "$PIN_FILE"
+    fi
+
+    if [[ "$mode" == "range" ]]; then
+        if [[ ! "$filter_value" =~ ^[0-9]+$ || ! "$range_end" =~ ^[0-9]+$ ]]; then
+            printf 'Error: Range must use the format <start>-<end>, for example 10-20.\n' >&2
+            return 2
+        fi
+
+        local range_start_offset=$((10#$filter_value))
+        local range_end_offset=$((10#$range_end))
+
+        if ((range_end_offset <= range_start_offset)); then
+            printf 'Error: Range end must be greater than range start.\n' >&2
+            return 2
+        fi
+    fi
+
+    if [[ "$mode" == "search-text" ]]; then
+        if [[ -z "$filter_value" ]]; then
+            printf 'Error: Search query cannot be empty.\n' >&2
+            return 2
+        fi
+        normalized_filter="${filter_value,,}"
+    fi
+
+    if [[ "$mode" == "search-type" ]]; then
+        filter_value="${filter_value,,}"
+        if [[ "$filter_value" != "img" && "$filter_value" != "text" ]]; then
+            printf 'Error: Search type must be img or text.\n' >&2
+            return 2
+        fi
+    fi
+
+    database_file="$(mktemp)"
+
+    if ! cliphist list > "$database_file"; then
+        rm -f -- "$database_file"
+        printf 'Error: Failed to read clipboard database.\n' >&2
+        return 1
+    fi
+
+    if [[ "$mode" == "range" ]]; then
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            [[ "$line" == *$'\t'* ]] || continue
+            entry_id="${line%%$'\t'*}"
+            [[ "$entry_id" =~ ^[0-9]+$ ]] || continue
+            entry_numeric=$((10#$entry_id))
+            if ((entry_numeric > max_id)); then
+                max_id="$entry_numeric"
+            fi
+        done < "$database_file"
+
+        if ((max_id == 0)); then
+            rm -f -- "$database_file"
+            printf 'Clipboard history is empty.\n'
+            return 0
+        fi
+
+        range_start_id=$((max_id - range_start_offset))
+        range_end_id=$((max_id - range_end_offset + 1))
+        ((range_start_id >= 0)) || range_start_id=0
+        ((range_end_id >= 0)) || range_end_id=0
+    fi
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ "$line" == *$'\t'* ]] || continue
+
+        entry_id="${line%%$'\t'*}"
+        content="${line#*$'\t'}"
+
+        [[ "$entry_id" =~ ^[0-9]+$ ]] || continue
+
+        if [[ "$mode" == "pin" ]] && [[ -z "${pinned_ids[$entry_id]+x}" ]]; then
+            continue
+        fi
+
+        if [[ "$mode" == "range" ]]; then
+            entry_numeric=$((10#$entry_id))
+            if ((entry_numeric > range_start_id || entry_numeric < range_end_id)); then
+                continue
+            fi
+        fi
+
+        normalized_content="${content,,}"
+
+        if [[ "$normalized_content" =~ \[\[[[:space:]]*binary[[:space:]]+data ]]; then
+            entry_type="img"
+        else
+            entry_type="text"
+        fi
+
+        if [[ "$mode" == "search-type" && "$entry_type" != "$filter_value" ]]; then
+            continue
+        fi
+
+        if [[ "$mode" == "search-text" ]]; then
+            [[ "$entry_type" == "text" ]] || continue
+            if [[ "$normalized_content" != *"$normalized_filter"* ]]; then
+                continue
+            fi
+        fi
+
+        if ((${#content} > CONTENT_LIMIT)); then
+            content="${content:0:CONTENT_LIMIT-3}..."
+        fi
+
+        entry_ids+=("$entry_id")
+        entry_contents+=("$content")
+        entry_types+=("$entry_type")
+    done < "$database_file"
+
+    rm -f -- "$database_file"
+
+    total_entries="${#entry_ids[@]}"
+
+    if [[ "$mode" == "range" || "$mode" == "search-type" || "$mode" == "search-text" ]]; then
+        display_count="$total_entries"
+    elif [[ "$limit" == "all" || "$limit" == "0" ]]; then
+        display_count="$total_entries"
+    elif [[ "$limit" =~ ^[0-9]+$ ]] && ((10#$limit > 0)); then
+        display_count="$((10#$limit))"
+    else
+        printf 'Error: Invalid list limit. Use a positive number or all.\n' >&2
+        return 2
+    fi
+
+    if ((display_count > total_entries)); then
+        display_count="$total_entries"
+    fi
+
+    printf '%-6s | %-50s | %s\n' "ID" "Content" "Type"
+    printf '%s\n' '-------|----------------------------------------------------|------'
+
+    if ((total_entries == 0)); then
+        case "$mode" in
+            pin)         printf 'No pinned clipboard entries found.\n' ;;
+            range)       printf 'No clipboard entries found in the requested range.\n' ;;
+            search-text|search-type) printf 'No matching clipboard entries found.\n' ;;
+            *)           printf 'Clipboard history is empty.\n' ;;
+        esac
+        return 0
+    fi
+
+    for ((index = display_count - 1; index >= 0; index--)); do
+        printf '%-6s | %-50s | %s\n' \
+            "${entry_ids[index]}" \
+            "${entry_contents[index]}" \
+            "${entry_types[index]}"
+
+        if [[ "${entry_types[index]}" == "img" ]]; then
+            if preview_path="$(create_image_preview "${entry_ids[index]}")"; then
+                escaped_path="${preview_path//\\/\\\\}"
+                escaped_path="${escaped_path//\"/\\\"}"
+
+                printf 'id %s "%s"\n' \
+                    "${entry_ids[index]}" \
+                    "$escaped_path" >> "$PREVIEW_INDEX"
+            else
+                printf 'Warning: Preview unavailable for entry %s.\n' \
+                    "${entry_ids[index]}" >&2
+            fi
+        fi
+    done
+
+    if [[ "$mode" == "range" ]]; then
+        printf '\nShowing %s entries in offset range %s-%s.\n' \
+            "$display_count" "$filter_value" "$range_end"
+    elif [[ "$mode" == "search-text" ]]; then
+        printf '\nFound %s matching text entries.\n' "$display_count"
+    elif [[ "$mode" == "search-type" ]]; then
+        printf '\nFound %s entries of type %s.\n' "$display_count" "$filter_value"
+    else
+        printf '\nShowing %s of %s entries.\n' \
+            "$display_count" "$total_entries"
+    fi
+}
+resolve_entry() {
+    local entry_id="$1"
+    local database_file
+    local line=""
+    local line_id
+    local selected_item=""
+
+    if [[ ! "$entry_id" =~ ^[0-9]+$ ]]; then
+        printf 'Error: Invalid clipboard entry ID.\n' >&2
+        return 2
+    fi
+
+    database_file="$(mktemp)"
+
+    if ! cliphist list > "$database_file"; then
+        rm -f -- "$database_file"
+        printf 'Error: Failed to read clipboard database.\n' >&2
+        return 1
+    fi
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ "$line" == *$'\t'* ]] || continue
+
+        line_id="${line%%$'\t'*}"
+
+        if [[ "$line_id" == "$entry_id" ]]; then
+            selected_item="$line"
+            break
+        fi
+    done < "$database_file"
+
+    rm -f -- "$database_file"
+
+    if [[ -z "$selected_item" ]]; then
+        printf 'Error: Clipboard entry %s was not found.\n' "$entry_id" >&2
+        return 1
+    fi
+
+    printf '%s\n' "$selected_item"
+}
+
+create_image_preview() {
+    local entry_id="$1"
+    local selected_item
+    local preview
+    local normalized_preview
+    local extension
+    local target_file
+    local temporary_file
+    local cache_file
+    local cache_number=1
+
+    selected_item="$(resolve_entry "$entry_id")" || return 1
+
+    preview="${selected_item#*$'\t'}"
+    normalized_preview="${preview,,}"
+
+    if [[ ! "$normalized_preview" =~ \[\[[[:space:]]*binary[[:space:]]+data ]]; then
+        printf 'Error: Clipboard entry %s is not an image.\n' "$entry_id" >&2
+        return 1
+    fi
+
+    case "$normalized_preview" in
+        *png*)         extension="png" ;;
+        *jpeg*|*jpg*)  extension="jpg" ;;
+        *webp*)        extension="webp" ;;
+        *gif*)         extension="gif" ;;
+        *bmp*)         extension="bmp" ;;
+        *tiff*|*tif*)  extension="tiff" ;;
+        *avif*)        extension="avif" ;;
+        *heic*)        extension="heic" ;;
+        *svg*)         extension="svg" ;;
+        *)
+            printf 'Error: Unsupported image format for entry %s.\n' "$entry_id" >&2
+            return 1
+            ;;
+    esac
+
+    temporary_file="$(mktemp "$PREVIEW_DIR/.preview.XXXXXX")"
+
+    if ! printf '%s\n' "$selected_item" | cliphist decode > "$temporary_file"; then
+        rm -f -- "$temporary_file"
+        printf 'Error: Failed to decode image entry %s.\n' "$entry_id" >&2
+        return 1
+    fi
+
+    for cache_file in "$PREVIEW_DIR"/cache*.*; do
+        [[ -f "$cache_file" ]] || continue
+
+        if cmp -s -- "$temporary_file" "$cache_file"; then
+            rm -f -- "$temporary_file"
+            printf '%s\n' "$cache_file"
+            return 0
+        fi
+    done
+
+    while compgen -G "$PREVIEW_DIR/cache${cache_number}.*" > /dev/null; do
+        cache_number=$((cache_number + 1))
+    done
+
+    target_file="$PREVIEW_DIR/cache${cache_number}.${extension}"
+
+    if ! mv -- "$temporary_file" "$target_file"; then
+        rm -f -- "$temporary_file"
+        printf 'Error: Failed to save preview for entry %s.\n' "$entry_id" >&2
+        return 1
+    fi
+
+    printf '%s\n' "$target_file"
+}
+
+snapshot_pins() {
+    local snapshot_dir="$1"
+    local database_file="$snapshot_dir/before-list"
+    local manifest="$snapshot_dir/pins.tsv"
+    local pin_id
+    local line=""
+    local line_id
+    local selected_item
+    local snapshot_file
+
+    : > "$manifest"
+
+    if ! cliphist list > "$database_file"; then
+        printf 'Error: Failed to snapshot clipboard database.\n' >&2
+        return 1
+    fi
+
+    while IFS= read -r pin_id || [[ -n "$pin_id" ]]; do
+        [[ "$pin_id" =~ ^[0-9]+$ ]] || continue
+
+        selected_item=""
+
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            [[ "$line" == *$'\t'* ]] || continue
+
+            line_id="${line%%$'\t'*}"
+
+            if [[ "$line_id" == "$pin_id" ]]; then
+                selected_item="$line"
+                break
+            fi
+        done < "$database_file"
+
+        [[ -n "$selected_item" ]] || continue
+
+        snapshot_file="$snapshot_dir/pin-$pin_id.bin"
+
+        if printf '%s\n' "$selected_item" | cliphist decode > "$snapshot_file"; then
+            printf '%s\t%s\n' "$pin_id" "$snapshot_file" >> "$manifest"
+        else
+            rm -f -- "$snapshot_file"
+            printf 'Warning: Could not snapshot pinned entry %s.\n' "$pin_id" >&2
+        fi
+    done < "$PIN_FILE"
+}
+
+wait_for_latest_content() {
+    local expected_file="$1"
+    local snapshot_dir="$2"
+    local attempt
+    local line=""
+    local latest_line=""
+    local latest_list="$snapshot_dir/latest-list"
+    local candidate_file="$snapshot_dir/latest-data"
+
+    for ((attempt = 0; attempt < 20; attempt++)); do
+        if cliphist list > "$latest_list"; then
+            latest_line=""
+
+            while IFS= read -r line || [[ -n "$line" ]]; do
+                [[ "$line" == *$'\t'* ]] || continue
+                latest_line="$line"
+                break
+            done < "$latest_list"
+
+            if [[ -n "$latest_line" ]] &&
+                printf '%s\n' "$latest_line" | cliphist decode > "$candidate_file" 2>/dev/null; then
+                if cmp -s -- "$expected_file" "$candidate_file"; then
+                    return 0
+                fi
+            fi
+        fi
+
+        sleep 0.1
+    done
+
+    return 1
+}
+
+update_pinned_ids() {
+    local snapshot_dir="$1"
+    local excluded_value="${2:-}"
+    local manifest="$snapshot_dir/pins.tsv"
+    local current_list="$snapshot_dir/current-list"
+    local candidate_file="$snapshot_dir/candidate.bin"
+    local temporary_pin_file
+    local old_id
+    local snapshot_file
+    local line=""
+    local new_id
+    local matched_id
+    local excluded_id
+
+    local -A seen_ids=()
+    local -A excluded_ids=()
+
+    if [[ -n "$excluded_value" ]]; then
+        if [[ -f "$excluded_value" ]]; then
+            while IFS= read -r excluded_id || [[ -n "$excluded_id" ]]; do
+                [[ "$excluded_id" =~ ^[0-9]+$ ]] || continue
+                excluded_ids["$excluded_id"]=1
+            done < "$excluded_value"
+        elif [[ "$excluded_value" =~ ^[0-9]+$ ]]; then
+            excluded_ids["$excluded_value"]=1
+        fi
+    fi
+
+    if ! cliphist list > "$current_list"; then
+        printf 'Error: Failed to refresh clipboard database.\n' >&2
+        return 1
+    fi
+
+    temporary_pin_file="$(mktemp "${PIN_FILE}.XXXXXX")"
+
+    while IFS=$'\t' read -r old_id snapshot_file; do
+        [[ "$old_id" =~ ^[0-9]+$ ]] || continue
+        [[ -f "$snapshot_file" ]] || continue
+
+        if [[ -n "${excluded_ids[$old_id]+x}" ]]; then
+            continue
+        fi
+
+        matched_id=""
+
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            [[ "$line" == *$'\t'* ]] || continue
+
+            new_id="${line%%$'\t'*}"
+            [[ "$new_id" =~ ^[0-9]+$ ]] || continue
+
+            if printf '%s\n' "$line" | cliphist decode > "$candidate_file" 2>/dev/null; then
+                if cmp -s -- "$snapshot_file" "$candidate_file"; then
+                    matched_id="$new_id"
+                    break
+                fi
+            fi
+        done < "$current_list"
+
+        if [[ -n "$matched_id" ]]; then
+            if [[ -z "${seen_ids[$matched_id]+x}" ]]; then
+                printf '%s\n' "$matched_id" >> "$temporary_pin_file"
+                seen_ids["$matched_id"]=1
+            fi
+        else
+            printf 'Warning: Pinned entry %s no longer exists; removing stale pin.\n' "$old_id" >&2
+        fi
+    done < "$manifest"
+
+    if ! mv -- "$temporary_pin_file" "$PIN_FILE"; then
+        rm -f -- "$temporary_pin_file"
+        printf 'Error: Failed to update pinned IDs.\n' >&2
+        return 1
+    fi
+}
+
+select_entry() {
+    local entry_id="$1"
+    local selected_item
+    local preview
+    local normalized_preview
+    local mime_type=""
+    local temporary_file
+
+    selected_item="$(resolve_entry "$entry_id")" || return 1
+
+    WORK_DIR="$(mktemp -d)"
+    snapshot_pins "$WORK_DIR" || return 1
+
+    preview="${selected_item#*$'\t'}"
+    normalized_preview="${preview,,}"
+    temporary_file="$WORK_DIR/selected-data"
+
+    if [[ "$normalized_preview" =~ \[\[[[:space:]]*binary[[:space:]]+data ]]; then
+        case "$normalized_preview" in
+            *png*)         mime_type="image/png" ;;
+            *jpeg*|*jpg*)  mime_type="image/jpeg" ;;
+            *webp*)        mime_type="image/webp" ;;
+            *gif*)         mime_type="image/gif" ;;
+            *bmp*)         mime_type="image/bmp" ;;
+            *tiff*|*tif*)  mime_type="image/tiff" ;;
+            *avif*)        mime_type="image/avif" ;;
+            *heic*)        mime_type="image/heic" ;;
+            *svg*)         mime_type="image/svg+xml" ;;
+            *)
+                printf 'Error: Unsupported binary clipboard format.\n' >&2
+                return 1
+                ;;
+        esac
+    fi
+
+    if ! printf '%s\n' "$selected_item" | cliphist decode > "$temporary_file"; then
+        printf 'Error: Failed to decode clipboard entry %s.\n' "$entry_id" >&2
+        return 1
+    fi
+
+    if [[ -n "$mime_type" ]]; then
+        if ! wl-copy --type "$mime_type" < "$temporary_file"; then
+            printf 'Error: Failed to copy image to clipboard.\n' >&2
+            return 1
+        fi
+
+        printf 'Image entry %s is ready to paste (%s).\n' "$entry_id" "$mime_type"
+    else
+        if ! wl-copy < "$temporary_file"; then
+            printf 'Error: Failed to copy text to clipboard.\n' >&2
+            return 1
+        fi
+
+        printf 'Text entry %s is ready to paste.\n' "$entry_id"
+    fi
+
+    if ! wait_for_latest_content "$temporary_file" "$WORK_DIR"; then
+        printf 'Warning: Clipboard watcher did not confirm the latest entry within 2 seconds.\n' >&2
+    fi
+
+    update_pinned_ids "$WORK_DIR"
+}
+
+delete_entry() {
+    local entry_id="$1"
+    local selected_item
+
+    selected_item="$(resolve_entry "$entry_id")" || return 1
+
+    WORK_DIR="$(mktemp -d)"
+    snapshot_pins "$WORK_DIR" || return 1
+
+    if ! printf '%s\n' "$selected_item" | cliphist delete; then
+        printf 'Error: Failed to delete clipboard entry %s.\n' "$entry_id" >&2
+        return 1
+    fi
+
+    update_pinned_ids "$WORK_DIR" "$entry_id" || return 1
+
+    printf 'Clipboard entry %s deleted successfully.\n' "$entry_id"
+}
+
+delete_range() {
+    local range_value="$1"
+    local initial_list
+    local current_line=""
+    local entry_id
+    local entry_numeric
+    local max_id=0
+    local cutoff
+    local count_value
+    local target_line
+    local target_id
+    local deleted_count=0
+    local excluded_file
+    local index
+
+    local -a target_lines=()
+    local -a target_ids=()
+
+    if [[ "$range_value" == "all" ]]; then
+        if ! cliphist wipe; then
+            printf 'Error: Failed to clear clipboard history.\n' >&2
+            return 1
+        fi
+
+        if ! : > "$PIN_FILE"; then
+            printf 'Error: Failed to clear pinned entries.\n' >&2
+            return 1
+        fi
+
+        : > "$PREVIEW_INDEX"
+        find "$PREVIEW_DIR" -maxdepth 1 -type f -delete
+
+        printf 'All clipboard entries and pins have been deleted.\n'
+        return 0
+    fi
+
+    if [[ ! "$range_value" =~ ^[0-9]+$ ]]; then
+        printf 'Error: Range must be a positive integer or all.\n' >&2
+        return 2
+    fi
+
+    count_value=$((10#$range_value))
+
+    if ((count_value <= 0)); then
+        printf 'Error: Range must be greater than zero.\n' >&2
+        return 2
+    fi
+
+    WORK_DIR="$(mktemp -d)"
+
+    snapshot_pins "$WORK_DIR" || return 1
+
+    initial_list="$WORK_DIR/before-list"
+    excluded_file="$WORK_DIR/deleted-ids"
+
+    : > "$excluded_file"
+
+    while IFS= read -r current_line || [[ -n "$current_line" ]]; do
+        [[ "$current_line" == *$'\t'* ]] || continue
+
+        entry_id="${current_line%%$'\t'*}"
+        [[ "$entry_id" =~ ^[0-9]+$ ]] || continue
+
+        entry_numeric=$((10#$entry_id))
+
+        if ((entry_numeric > max_id)); then
+            max_id="$entry_numeric"
+        fi
+    done < "$initial_list"
+
+    if ((max_id == 0)); then
+        printf 'Clipboard history is empty.\n'
+        return 0
+    fi
+
+    cutoff=$((max_id - count_value + 1))
+
+    if ((cutoff < 0)); then
+        cutoff=0
+    fi
+
+    while IFS= read -r current_line || [[ -n "$current_line" ]]; do
+        [[ "$current_line" == *$'\t'* ]] || continue
+
+        entry_id="${current_line%%$'\t'*}"
+        [[ "$entry_id" =~ ^[0-9]+$ ]] || continue
+
+        entry_numeric=$((10#$entry_id))
+
+        if ((entry_numeric >= cutoff && entry_numeric <= max_id)); then
+            target_lines+=("$current_line")
+            target_ids+=("$entry_id")
+        fi
+    done < "$initial_list"
+
+    if ((${#target_lines[@]} == 0)); then
+        update_pinned_ids "$WORK_DIR" || return 1
+        printf 'No clipboard entries matched the requested range.\n'
+        return 0
+    fi
+
+    for ((index = 0; index < ${#target_lines[@]}; index++)); do
+        target_line="${target_lines[index]}"
+        target_id="${target_ids[index]}"
+
+        if printf '%s\n' "$target_line" | cliphist delete; then
+            printf '%s\n' "$target_id" >> "$excluded_file"
+            deleted_count=$((deleted_count + 1))
+        else
+            printf 'Error: Failed to delete clipboard entry %s.\n' "$target_id" >&2
+            update_pinned_ids "$WORK_DIR" "$excluded_file" || true
+            return 1
+        fi
+    done
+
+    update_pinned_ids "$WORK_DIR" "$excluded_file" || return 1
+
+    printf 'Deleted %s clipboard entries from ID range %s-%s.\n' "$deleted_count" "$cutoff" "$max_id"
+}
+
+pin_entry() {
+    local entry_id="$1"
+
+    resolve_entry "$entry_id" > /dev/null || return 1
+
+    if grep -Fxq -- "$entry_id" "$PIN_FILE"; then
+        printf 'Clipboard entry %s is already pinned.\n' "$entry_id"
+        return 0
+    fi
+
+    printf '%s\n' "$entry_id" >> "$PIN_FILE"
+
+    printf 'Clipboard entry %s pinned successfully.\n' "$entry_id"
+}
+
+show_info() {
+    local database_file
+    local line
+    local entry_id
+    local pin_id
+    local total_clipboard=0
+    local total_pins=0
+
+    local -A pinned_ids=()
+
+    database_file="$(mktemp)"
+
+    if ! cliphist list > "$database_file"; then
+        rm -f -- "$database_file"
+        printf 'Error: Failed to read clipboard database.\n' >&2
+        return 1
+    fi
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ "$line" == *$'\t'* ]] || continue
+
+        entry_id="${line%%$'\t'*}"
+        [[ "$entry_id" =~ ^[0-9]+$ ]] || continue
+
+        total_clipboard=$((total_clipboard + 1))
+    done < "$database_file"
+
+    rm -f -- "$database_file"
+
+    while IFS= read -r pin_id || [[ -n "$pin_id" ]]; do
+        [[ "$pin_id" =~ ^[0-9]+$ ]] || continue
+
+        if [[ -n "${pinned_ids[$pin_id]+x}" ]]; then
+            continue
+        fi
+
+        pinned_ids["$pin_id"]=1
+        total_pins=$((total_pins + 1))
+    done < "$PIN_FILE"
+
+    printf 'Total clipboard : %s\n' "$total_clipboard"
+    printf 'Total pinned    : %s\n' "$total_pins"
+}
+
+case "$ACTION" in
+    list)
+        if [[ "$VALUE" == "pin" ]]; then
+            list_entries "${3:-10}" "pin"
+        elif [[ "$VALUE" == "range" ]]; then
+            range_spec="${3:-0-10}"
+            range_spec="${range_spec//[[:space:]]/}"
+
+            if [[ "$range_spec" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+                list_entries "all" "range" "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+            elif [[ "$3" =~ ^[0-9]+$ && "${4:-}" =~ ^[0-9]+$ ]]; then
+                list_entries "all" "range" "$3" "$4"
+            else
+                printf 'Usage: %s list range <start-end>\n' "$0" >&2
+                exit 2
+            fi
+        else
+            list_entries "${VALUE:-10}" "all"
+        fi
+        ;;
+    search)
+        if [[ "${VALUE,,}" == "type" ]]; then
+            search_type="${3:-}"
+            if [[ -z "$search_type" ]]; then
+                printf 'Usage: %s search type <img|text>\n' "$0" >&2
+                exit 2
+            fi
+            list_entries "all" "search-type" "$search_type"
+        else
+            search_query="$VALUE"
+            if (($# > 2)); then
+                search_query="${*:2}"
+            fi
+            if [[ -z "$search_query" ]]; then
+                printf 'Usage: %s search <text>|search type <img|text>\n' "$0" >&2
+                exit 2
+            fi
+            list_entries "all" "search-text" "$search_query"
+        fi
+        ;;
+    sel)
+        [[ -n "$VALUE" ]] || {
+            printf 'Usage: %s sel <id>\n' "$0" >&2
+            exit 2
+        }
+
+        select_entry "$VALUE"
+        ;;
+    del)
+        if [[ "$VALUE" == "range" ]]; then
+            [[ -n "${3:-}" ]] || {
+                printf 'Usage: %s del range <count|all>\n' "$0" >&2
+                exit 2
+            }
+
+            delete_range "$3"
+        else
+            [[ -n "$VALUE" ]] || {
+                printf 'Usage: %s del <id>|del range <count|all>\n' "$0" >&2
+                exit 2
+            }
+
+            delete_entry "$VALUE"
+        fi
+        ;;
+    pin)
+        [[ -n "$VALUE" ]] || {
+            printf 'Usage: %s pin <id>\n' "$0" >&2
+            exit 2
+        }
+
+        pin_entry "$VALUE"
+        ;;
+    info)
+        show_info
+        ;;
+    *)
+        printf 'Usage: %s [list [count|all]|list pin [count|all]|list range <start-end>|search <text>|search type <img|text>|sel <id>|del <id>|del range <count|all>|pin <id>|info]\n' "$0" >&2
+        exit 2
+        ;;
+esac
