@@ -1,4 +1,3 @@
-
 import QtQuick
 import Quickshell
 import Quickshell.Wayland
@@ -6,12 +5,17 @@ import Quickshell.Hyprland
 
 import "module/launcher"
 import "module/clipboard"
+import "module/settings"
 import "ipc"
 
 ShellRoot {
     id: root
 
     property var activeLauncher: null
+
+    Settings {
+        id: settings
+    }
 
     Variants {
         model: Quickshell.screens
@@ -20,7 +24,6 @@ ShellRoot {
             id: window
 
             required property var modelData
-
             property bool focusGrabReady: false
 
             screen: modelData
@@ -33,6 +36,7 @@ ShellRoot {
             }
 
             color: "transparent"
+            focusable: launcher.open || clipboard.open
 
             WlrLayershell.keyboardFocus:
                 launcher.open || clipboard.open
@@ -45,19 +49,21 @@ ShellRoot {
             }
 
             function syncOverlayFocus() {
+                focusClearDelay.stop()
+
                 if (!launcher.open && !clipboard.open) {
                     focusGrabDelay.stop()
-                    focusClearDelay.stop()
                     focusGrabReady = false
                     return
                 }
-
-                focusClearDelay.stop()
 
                 focusGrabReady = false
                 focusGrabDelay.restart()
 
                 Qt.callLater(function() {
+                    if (!launcher.open && !clipboard.open)
+                        return
+
                     window.requestActivate()
 
                     if (clipboard.open)
@@ -69,7 +75,6 @@ ShellRoot {
 
             Timer {
                 id: focusGrabDelay
-
                 interval: 180
                 repeat: false
 
@@ -81,7 +86,6 @@ ShellRoot {
 
             Timer {
                 id: focusClearDelay
-
                 interval: 120
                 repeat: false
 
@@ -91,41 +95,58 @@ ShellRoot {
 
                     if (clipboard.open)
                         clipboard.hide()
+
+                    window.focusGrabReady = false
                 }
             }
 
             HyprlandFocusGrab {
-                id: launcherFocusGrab
-
+                id: overlayFocusGrab
                 windows: [window]
 
                 active: (launcher.open || clipboard.open)
                     && window.focusGrabReady
 
                 onCleared: {
-                    if (window.focusGrabReady)
-                        focusClearDelay.restart()
+                    if (!window.focusGrabReady)
+                        return
+
+                    window.focusGrabReady = false
+                    focusClearDelay.restart()
                 }
             }
 
             LauncherIpc {
                 launcher: launcher
-
                 enabled: root.activeLauncher === launcher
             }
 
             ClipboardIpc {
                 clipboard: clipboard
-
                 enabled: root.activeLauncher === launcher
             }
 
             Connections {
                 target: launcher
 
-                function onOpenChanged() {
-                    if (launcher.open && clipboard.open)
+                function onSettingsRequested() {
+                    if (launcher.open)
+                        launcher.hide()
+
+                    if (clipboard.open)
                         clipboard.hide()
+
+                    settings.show()
+                }
+
+                function onOpenChanged() {
+                    if (launcher.open) {
+                        if (clipboard.open)
+                            clipboard.hide()
+
+                        if (settings.open)
+                            settings.hide()
+                    }
 
                     window.syncOverlayFocus()
                 }
@@ -135,10 +156,29 @@ ShellRoot {
                 target: clipboard
 
                 function onOpenChanged() {
-                    if (clipboard.open && launcher.open)
-                        launcher.hide()
+                    if (clipboard.open) {
+                        if (launcher.open)
+                            launcher.hide()
+
+                        if (settings.open)
+                            settings.hide()
+                    }
 
                     window.syncOverlayFocus()
+                }
+            }
+
+            Connections {
+                target: settings
+
+                function onOpenChanged() {
+                    if (settings.open) {
+                        if (launcher.open)
+                            launcher.hide()
+
+                        if (clipboard.open)
+                            clipboard.hide()
+                    }
                 }
             }
 
@@ -146,15 +186,15 @@ ShellRoot {
                 Region {
                     x: launcher.x
                     y: launcher.y
-                    width: launcher.width
-                    height: launcher.height
+                    width: launcher.open ? launcher.width : 0
+                    height: launcher.open ? launcher.height : 0
                 }
 
                 Region {
                     x: clipboard.x
                     y: clipboard.y
-                    width: clipboard.width
-                    height: clipboard.height
+                    width: clipboard.open ? clipboard.width : 0
+                    height: clipboard.open ? clipboard.height : 0
                 }
             }
 

@@ -17,6 +17,8 @@ Item {
             : text.toLowerCase()
     }
 
+    signal settingsRequested()
+
     // Visible commands are listed first.
     // Set visible to false to keep a command hidden.
     property var commandEntries: [
@@ -65,12 +67,12 @@ Item {
         {
             id: "command-setting",
             kind: "command",
-            name: "Setting",
-            genericName: "Open system settings",
-            comment: "Not implemented yet",
+            name: "Settings",
+            genericName: "System settings",
+            comment: "Open the custom system settings interface",
             icon: "preferences-system",
             action: "settings",
-            keywords: ["settings", "configuration", "preferences"]
+            keywords: ["settings", "configuration", "preferences", "system"]
         },
         {
             id: "command-posi",
@@ -177,6 +179,11 @@ Item {
     function runCommand(entry) {
         if (!entry)
             return
+
+        if (entry.action === "settings") {
+            root.settingsRequested()
+            return
+        }
 
         root.hide()
 
