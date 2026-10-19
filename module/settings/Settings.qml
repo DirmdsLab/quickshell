@@ -13,6 +13,7 @@ FloatingWindow {
 
     property bool open: false
     property bool closing: false
+    property bool windowShown: false
     property real progress: open ? 1 : 0
     property int selectedIndex: 0
     property string query: ""
@@ -83,8 +84,8 @@ FloatingWindow {
     property var currentSection: sections[Math.max(0, Math.min(selectedIndex, sections.length - 1))]
 
     function show() {
-        closeTimer.stop()
         closing = false
+        windowShown = true
         open = true
         Qt.callLater(function() {
             if (root.open)
@@ -99,7 +100,13 @@ FloatingWindow {
         open = false
         closing = true
         searchField.focus = false
-        closeTimer.restart()
+    }
+
+    function hideImmediately() {
+        open = false
+        closing = false
+        searchField.focus = false
+        windowShown = false
     }
 
     function toggle() {
@@ -118,7 +125,7 @@ FloatingWindow {
             || section.description.toLowerCase().includes(value)
     }
 
-    visible: open || closing
+    visible: windowShown
 
     onClosing: function(closeEvent) {
         closeEvent.accepted = false
@@ -129,38 +136,31 @@ FloatingWindow {
         sequence: "Escape"
         context: Qt.WindowShortcut
         enabled: root.open
-        onActivated: root.hide()
-    }
-
-    Timer {
-        id: closeTimer
-        interval: 240
-        repeat: false
-
-        onTriggered: {
-            if (!root.open)
-                root.closing = false
-        }
+        onActivated: root.hideImmediately()
     }
 
     Behavior on progress {
-        NumberAnimation { duration: 220; easing.type: Easing.OutCubic }
+        NumberAnimation {
+            duration: 180
+            easing.type: Easing.OutCubic
+
+            onFinished: {
+                if (!root.open) {
+                    root.closing = false
+                    root.windowShown = false
+                }
+            }
+        }
     }
 
     Rectangle {
         id: panel
         anchors.fill: parent
-        radius: 26
+        radius: 0
         color: "#171d1d"
-        border.width: 1
-        border.color: "#384141"
+        border.width: 0
         opacity: root.progress
-        scale: 0.97 + root.progress * 0.03
         clip: true
-
-        Behavior on scale {
-            NumberAnimation { duration: 220; easing.type: Easing.OutCubic }
-        }
 
         Row {
             anchors.fill: parent
@@ -171,15 +171,7 @@ FloatingWindow {
                 width: panel.width * 0.32
                 height: parent.height
                 color: "#111717"
-                radius: 26
-
-                Rectangle {
-                    x: sidebar.width - 26
-                    y: 0
-                    width: 26
-                    height: sidebar.height
-                    color: sidebar.color
-                }
+                radius: 0
 
                 Text {
                     x: 25; y: 22
@@ -213,7 +205,7 @@ FloatingWindow {
                         border.color: "#9eeaf3"
                     }
                     onTextChanged: root.query = text
-                    Keys.onEscapePressed: root.hide()
+                    Keys.onEscapePressed: root.hideImmediately()
                 }
 
                 ListView {
@@ -276,15 +268,7 @@ FloatingWindow {
                 width: panel.width - sidebar.width
                 height: parent.height
                 color: "#1b2222"
-                radius: 26
-
-                Rectangle {
-                    x: 0
-                    y: 0
-                    width: 26
-                    height: mainPane.height
-                    color: mainPane.color
-                }
+                radius: 0
 
                 Text {
                     x: 30; y: 26
@@ -410,6 +394,7 @@ FloatingWindow {
         height: 72
         z: 10
         acceptedButtons: Qt.LeftButton
+        enabled: root.open
         onPressed: root.startSystemMove()
     }
 
@@ -421,6 +406,7 @@ FloatingWindow {
         z: 20
         cursorShape: Qt.SizeHorCursor
         acceptedButtons: Qt.LeftButton
+        enabled: root.open
         onPressed: root.startSystemResize(Qt.LeftEdge)
     }
 
@@ -432,6 +418,7 @@ FloatingWindow {
         z: 20
         cursorShape: Qt.SizeHorCursor
         acceptedButtons: Qt.LeftButton
+        enabled: root.open
         onPressed: root.startSystemResize(Qt.RightEdge)
     }
 
@@ -443,6 +430,7 @@ FloatingWindow {
         z: 20
         cursorShape: Qt.SizeVerCursor
         acceptedButtons: Qt.LeftButton
+        enabled: root.open
         onPressed: root.startSystemResize(Qt.TopEdge)
     }
 
@@ -454,6 +442,7 @@ FloatingWindow {
         z: 20
         cursorShape: Qt.SizeVerCursor
         acceptedButtons: Qt.LeftButton
+        enabled: root.open
         onPressed: root.startSystemResize(Qt.BottomEdge)
     }
 
@@ -465,6 +454,7 @@ FloatingWindow {
         z: 30
         cursorShape: Qt.SizeFDiagCursor
         acceptedButtons: Qt.LeftButton
+        enabled: root.open
         onPressed: root.startSystemResize(Qt.TopEdge | Qt.LeftEdge)
     }
 
@@ -476,6 +466,7 @@ FloatingWindow {
         z: 30
         cursorShape: Qt.SizeBDiagCursor
         acceptedButtons: Qt.LeftButton
+        enabled: root.open
         onPressed: root.startSystemResize(Qt.TopEdge | Qt.RightEdge)
     }
 
@@ -487,6 +478,7 @@ FloatingWindow {
         z: 30
         cursorShape: Qt.SizeBDiagCursor
         acceptedButtons: Qt.LeftButton
+        enabled: root.open
         onPressed: root.startSystemResize(Qt.BottomEdge | Qt.LeftEdge)
     }
 
@@ -498,6 +490,7 @@ FloatingWindow {
         z: 30
         cursorShape: Qt.SizeFDiagCursor
         acceptedButtons: Qt.LeftButton
+        enabled: root.open
         onPressed: root.startSystemResize(Qt.BottomEdge | Qt.RightEdge)
     }
 }

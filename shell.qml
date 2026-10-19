@@ -136,7 +136,14 @@ ShellRoot {
                     if (clipboard.open)
                         clipboard.hide()
 
-                    settings.show()
+                    if (settings.windowShown) {
+                        settings.hideImmediately()
+                        Qt.callLater(function() {
+                            settings.show()
+                        })
+                    } else {
+                        settings.show()
+                    }
                 }
 
                 function onOpenChanged() {
@@ -144,8 +151,6 @@ ShellRoot {
                         if (clipboard.open)
                             clipboard.hide()
 
-                        if (settings.open)
-                            settings.hide()
                     }
 
                     window.syncOverlayFocus()
@@ -160,8 +165,6 @@ ShellRoot {
                         if (launcher.open)
                             launcher.hide()
 
-                        if (settings.open)
-                            settings.hide()
                     }
 
                     window.syncOverlayFocus()
