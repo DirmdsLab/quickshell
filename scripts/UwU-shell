@@ -1,16 +1,15 @@
-
 #!/usr/bin/env bash
 
 set -euo pipefail
 
 usage() {
-    printf 'Usage: %s {launcher|clipboard} [toggle|open|close|focus]\n' "$0" >&2
+    printf 'Usage: %s {launcher|clipboard|quicksettings} [toggle|open|close|focus]\n' "$0" >&2
 }
 
 TARGET="${1:-}"
 
 case "$TARGET" in
-    launcher|clipboard)
+    launcher|clipboard|quicksettings)
         ;;
     *)
         usage

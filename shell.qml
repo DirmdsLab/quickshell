@@ -6,12 +6,18 @@ import Quickshell.Hyprland
 import "module/launcher"
 import "module/clipboard"
 import "module/settings"
+import "module/quicksettings"
 import "ipc"
 
 ShellRoot {
     id: root
 
     property var activeLauncher: null
+    property var activeQuickSettings: null
+
+    QuickSettingsIpc {
+        quicksettings: root.activeQuickSettings
+    }
 
     Settings {
         id: settings
@@ -36,22 +42,25 @@ ShellRoot {
             }
 
             color: "transparent"
-            focusable: launcher.open || clipboard.open
+            focusable: launcher.open || clipboard.open || quicksettings.open
 
             WlrLayershell.keyboardFocus:
-                launcher.open || clipboard.open
+                launcher.open || clipboard.open || quicksettings.open
                     ? WlrKeyboardFocus.Exclusive
                     : WlrKeyboardFocus.None
 
             Component.onCompleted: {
                 if (root.activeLauncher === null)
                     root.activeLauncher = launcher
+
+                if (root.activeQuickSettings === null)
+                    root.activeQuickSettings = quicksettings
             }
 
             function syncOverlayFocus() {
                 focusClearDelay.stop()
 
-                if (!launcher.open && !clipboard.open) {
+                if (!launcher.open && !clipboard.open && !quicksettings.open) {
                     focusGrabDelay.stop()
                     focusGrabReady = false
                     return
@@ -61,15 +70,17 @@ ShellRoot {
                 focusGrabDelay.restart()
 
                 Qt.callLater(function() {
-                    if (!launcher.open && !clipboard.open)
+                    if (!launcher.open && !clipboard.open && !quicksettings.open)
                         return
 
                     window.requestActivate()
 
                     if (clipboard.open)
                         clipboard.focusSearch()
-                    else
+                    else if (launcher.open)
                         launcher.focusSearch()
+                    else
+                        quicksettings.focusPanel()
                 })
             }
 
@@ -79,7 +90,7 @@ ShellRoot {
                 repeat: false
 
                 onTriggered: {
-                    if (launcher.open || clipboard.open)
+                    if (launcher.open || clipboard.open || quicksettings.open)
                         window.focusGrabReady = true
                 }
             }
@@ -96,6 +107,9 @@ ShellRoot {
                     if (clipboard.open)
                         clipboard.hide()
 
+                    if (quicksettings.open)
+                        quicksettings.hide()
+
                     window.focusGrabReady = false
                 }
             }
@@ -104,7 +118,7 @@ ShellRoot {
                 id: overlayFocusGrab
                 windows: [window]
 
-                active: (launcher.open || clipboard.open)
+                active: (launcher.open || clipboard.open || quicksettings.open)
                     && window.focusGrabReady
 
                 onCleared: {
@@ -136,6 +150,9 @@ ShellRoot {
                     if (clipboard.open)
                         clipboard.hide()
 
+                    if (quicksettings.open)
+                        quicksettings.hide()
+
                     if (settings.windowShown) {
                         settings.hideImmediately()
                         Qt.callLater(function() {
@@ -151,6 +168,8 @@ ShellRoot {
                         if (clipboard.open)
                             clipboard.hide()
 
+                        if (quicksettings.open)
+                            quicksettings.hide()
                     }
 
                     window.syncOverlayFocus()
@@ -165,6 +184,24 @@ ShellRoot {
                         if (launcher.open)
                             launcher.hide()
 
+                        if (quicksettings.open)
+                            quicksettings.hide()
+                    }
+
+                    window.syncOverlayFocus()
+                }
+            }
+
+            Connections {
+                target: quicksettings
+
+                function onOpenChanged() {
+                    if (quicksettings.open) {
+                        if (launcher.open)
+                            launcher.hide()
+
+                        if (clipboard.open)
+                            clipboard.hide()
                     }
 
                     window.syncOverlayFocus()
@@ -181,6 +218,9 @@ ShellRoot {
 
                         if (clipboard.open)
                             clipboard.hide()
+
+                        if (quicksettings.open)
+                            quicksettings.hide()
                     }
                 }
             }
@@ -199,6 +239,13 @@ ShellRoot {
                     width: clipboard.open ? clipboard.width : 0
                     height: clipboard.open ? clipboard.height : 0
                 }
+
+                Region {
+                    x: quicksettings.x
+                    y: quicksettings.y
+                    width: quicksettings.visible ? quicksettings.width : 0
+                    height: quicksettings.visible ? quicksettings.height : 0
+                }
             }
 
             Launcher {
@@ -207,6 +254,10 @@ ShellRoot {
 
             Clipboard {
                 id: clipboard
+            }
+
+            QuickSettings {
+                id: quicksettings
             }
         }
     }
