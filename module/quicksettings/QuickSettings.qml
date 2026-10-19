@@ -29,13 +29,16 @@ Item {
         { id: "airplane", label: "Airplane mode", icon: "AP" }
     ]
 
-    width: parent
-        ? Math.min(parent.width - 24, Math.min(430, Math.max(360, parent.width * 0.30)))
-        : 420
 
+    width: parent
+        ? Math.min(600, Math.max(280, parent.width - 32))
+        : 600
+
+    // Match the launcher's typical height with six visible results.
     height: parent
-        ? Math.min(parent.height, Math.min(300, Math.max(260, parent.height * 0.34)))
-        : 260
+        ? Math.min(parent.height - 32, 476)
+        : 476
+
 
     anchors.right: parent.right
     anchors.bottom: parent.bottom
@@ -219,7 +222,7 @@ Item {
         Column {
             id: content
             anchors.fill: parent
-            anchors.margins: 12
+            anchors.margins: 18
             spacing: 6
 
             Row {

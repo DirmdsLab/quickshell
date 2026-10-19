@@ -965,21 +965,103 @@ Item {
         }
     }
 
-    Rectangle {
+    Item {
+        id: clipboardPanelBackground
+
         anchors.fill: parent
 
-        radius: 24
-        topLeftRadius: 24
-        topRightRadius: 24
-        bottomLeftRadius: 0
-        bottomRightRadius: 0
+        readonly property real sideCurve: 28
+        readonly property real edgeBleed: 2
 
-        antialiasing: true
+        Canvas {
+            id: clipboardBackgroundCanvas
 
-        color: "#202020"
+            x: -clipboardPanelBackground.sideCurve
+            y: 0
+            width: root.width + clipboardPanelBackground.sideCurve * 2
+            height: root.height + clipboardPanelBackground.edgeBleed
 
-        border.width: 1
-        border.color: "#404040"
+            antialiasing: true
+
+            onWidthChanged: requestPaint()
+            onHeightChanged: requestPaint()
+
+            onPaint: {
+                const context = getContext("2d")
+                const left = clipboardPanelBackground.sideCurve
+                const right = left + root.width
+                const bottom = height
+                const topRadius = 24
+                const bottomCurve = clipboardPanelBackground.sideCurve
+
+                context.clearRect(0, 0, width, height)
+
+                context.beginPath()
+                context.moveTo(0, bottom)
+
+                // Bottom-left outward curve.
+                context.quadraticCurveTo(
+                    left, bottom,
+                    left, bottom - bottomCurve
+                )
+
+                // Normal top-left and top-right rounded corners.
+                context.lineTo(left, topRadius)
+                context.quadraticCurveTo(
+                    left, 0,
+                    left + topRadius, 0
+                )
+
+                context.lineTo(right - topRadius, 0)
+                context.quadraticCurveTo(
+                    right, 0,
+                    right, topRadius
+                )
+
+                // Bottom-right outward curve.
+                context.lineTo(right, bottom - bottomCurve)
+                context.quadraticCurveTo(
+                    right, bottom,
+                    width, bottom
+                )
+
+                context.closePath()
+
+                context.fillStyle = "#202020"
+                context.fill()
+
+                // Draw the outline without a border along the screen edge.
+                context.beginPath()
+                context.moveTo(0, bottom)
+
+                context.quadraticCurveTo(
+                    left, bottom,
+                    left, bottom - bottomCurve
+                )
+
+                context.lineTo(left, topRadius)
+                context.quadraticCurveTo(
+                    left, 0,
+                    left + topRadius, 0
+                )
+
+                context.lineTo(right - topRadius, 0)
+                context.quadraticCurveTo(
+                    right, 0,
+                    right, topRadius
+                )
+
+                context.lineTo(right, bottom - bottomCurve)
+                context.quadraticCurveTo(
+                    right, bottom,
+                    width, bottom
+                )
+
+                context.strokeStyle = "#404040"
+                context.lineWidth = 1
+                context.stroke()
+            }
+        }
     }
 
     Column {
