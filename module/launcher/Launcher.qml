@@ -15,12 +15,22 @@ Item {
     property bool bootNextMode: false
     property var bootNextEntries: []
     property bool bootNextLoading: false
+    property bool bootNextAuthorizing: false
+    property bool bootNextRestartConfirmationPending: false
+    property bool bootNextApplied: false
+    property string bootNextSelectedId: ""
+    property var bootNextPendingEntry: null
+    property string bootNextVerifyOutput: ""
     property string bootNextError: ""
     property string bootNextStderr: ""
     property string bootNextOperation: ""
     property string bootNextScriptPath: Quickshell.shellDir + "/scripts/os/bootnext.sh"
     property string envExecutable: "/usr/bin/env"
     property string pkexecExecutable: "/run/wrappers/bin/pkexec"
+    property string shellPath: String(
+        Quickshell.env("PATH")
+        || "/run/current-system/sw/bin:/run/wrappers/bin:/usr/bin:/bin"
+    )
 
     property bool commandMode: search.text.trim().startsWith(">")
 
@@ -225,8 +235,16 @@ Item {
         if (!entry)
             return "Confirm action"
 
-        if (entry.kind === "bootEntry")
+        if (entry.kind === "bootEntry") {
+            if (
+                root.bootNextApplied
+                && root.bootNextSelectedId === String(entry.bootId || "").toUpperCase()
+            ) {
+                return "Restart now to boot into " + entry.name + "?"
+            }
+
             return "Boot next to " + entry.name + "?"
+        }
 
         if (entry.id === "command-firmware")
             return "Restart into firmware setup?"
@@ -248,7 +266,14 @@ Item {
 
     function confirmationDescription(entry) {
         if (entry && entry.kind === "bootEntry") {
-            return "This EFI entry will be selected for the next boot. After authorization, the system will reboot automatically."
+            if (
+                root.bootNextApplied
+                && root.bootNextSelectedId === String(entry.bootId || "").toUpperCase()
+            ) {
+                return "BootNext is verified for this EFI entry. Confirm to restart now and boot into this operating system. Choosing No leaves it selected for your next reboot."
+            }
+
+            return "Authorize setting this EFI entry as BootNext. After authorization, BootNext will be verified and you will be asked to confirm the restart."
         }
 
         return "Are you sure you want to continue? This action may close your session or shut down the system."
@@ -259,11 +284,74 @@ Item {
             return
 
         confirmationTimer.stop()
+        restartConfirmationDelay.stop()
+        root.bootNextRestartConfirmationPending = false
+
+        if (entry.kind === "bootEntry") {
+            root.bootNextApplied = false
+            root.bootNextSelectedId = ""
+            root.bootNextPendingEntry = entry
+        }
+
         root.pendingCommand = entry
         root.confirmationSeconds = 15
         root.confirmationYesSelected = false
         confirmationPopup.open()
         confirmationTimer.start()
+    }
+
+    function requestRestartConfirmation(entry) {
+        if (!entry)
+            return
+
+        root.bootNextAuthorizing = false
+        root.bootNextMode = false
+        root.bootNextError = ""
+        root.pendingCommand = entry
+        root.confirmationSeconds = 15
+        root.confirmationYesSelected = false
+        root.bootNextRestartConfirmationPending = true
+
+        if (!confirmationPopup.visible)
+            restartConfirmationDelay.restart()
+    }
+
+    function openRestartConfirmation() {
+        if (
+            !root.bootNextRestartConfirmationPending
+            || !root.pendingCommand
+            || !root.bootNextApplied
+        ) {
+            return
+        }
+
+        restartConfirmationDelay.stop()
+        root.bootNextRestartConfirmationPending = false
+        root.open = true
+        confirmationPopup.open()
+        confirmationTimer.restart()
+    }
+
+    function showBootNextFailure(message) {
+        root.bootNextAuthorizing = false
+        root.bootNextRestartConfirmationPending = false
+        restartConfirmationDelay.stop()
+        root.bootNextOperation = ""
+        root.bootNextApplied = false
+        root.bootNextSelectedId = ""
+        root.bootNextError = String(message || "Failed to set or verify the next boot entry.")
+        root.bootNextMode = true
+        root.bootNextLoading = false
+        root.open = true
+        root.pendingCommand = null
+        confirmationTimer.stop()
+        if (confirmationPopup.visible)
+            confirmationPopup.close()
+        console.error("Next Boot failed:", root.bootNextError)
+        Qt.callLater(function() {
+            if (root.open)
+                root.focusSearch()
+        })
     }
 
     function requestBootNextMenu() {
@@ -336,6 +424,11 @@ Item {
     }
 
     function handleBootNextOutput(output) {
+        if (root.bootNextOperation === "set") {
+            root.bootNextVerifyOutput = String(output || "")
+            return
+        }
+
         if (root.bootNextOperation !== "list")
             return
 
@@ -385,9 +478,9 @@ Item {
 
     function handleBootNextExit(exitCode) {
         const operation = root.bootNextOperation
-        root.bootNextOperation = ""
 
         if (operation === "list") {
+            root.bootNextOperation = ""
             root.bootNextLoading = false
 
             if (exitCode !== 0) {
@@ -401,31 +494,73 @@ Item {
             return
         }
 
-        if (operation === "set" && exitCode !== 0) {
-            console.warn(
-                "Next Boot authorization was cancelled or the reboot command failed.",
-                root.bootNextStderr
+        if (operation === "set") {
+            root.bootNextAuthorizing = false
+
+            if (exitCode !== 0) {
+                root.showBootNextFailure(
+                    root.bootNextStderr.length > 0
+                        ? root.bootNextStderr
+                        : "Authorization was cancelled or efibootmgr failed. BootNext was not verified."
+                )
+                return
+            }
+
+            const match = /^BootNext:[\t ]*([0-9A-Fa-f]{4})/m.exec(
+                root.bootNextVerifyOutput
             )
-            root.hide()
+            const expectedId = String(
+                root.bootNextPendingEntry ? root.bootNextPendingEntry.bootId : ""
+            ).toUpperCase()
+
+            if (!match || match[1].toUpperCase() !== expectedId) {
+                root.showBootNextFailure(
+                    "efibootmgr completed, but BootNext could not be verified for Boot" + expectedId + "."
+                )
+                return
+            }
+
+            root.bootNextOperation = ""
+            root.bootNextApplied = true
+            root.bootNextSelectedId = expectedId
+            root.bootNextError = ""
+            root.requestRestartConfirmation(root.bootNextPendingEntry)
+            return
         }
+
+        root.bootNextOperation = ""
     }
 
     function executeBootNext(entry) {
         if (!entry || !/^[0-9A-F]{4}$/.test(String(entry.bootId || ""))) {
-            console.warn("Invalid EFI boot entry selection.")
-            root.hide()
+            root.showBootNextFailure("Invalid EFI boot entry selection.")
             return
         }
 
-        root.hide()
+        root.bootNextPendingEntry = entry
+        root.bootNextApplied = false
+        root.bootNextSelectedId = ""
+        root.bootNextAuthorizing = true
         root.bootNextOperation = "set"
         root.bootNextStderr = ""
+        root.bootNextVerifyOutput = ""
 
+        // Release the launcher focus grab so the Polkit agent can receive keyboard input.
+        root.hide()
+
+        // Set BootNext and read it back in the same privileged process.
         bootNextProcess.exec([
             root.pkexecExecutable,
-            root.bootNextScriptPath,
-            "set-reboot-root",
-            entry.bootId
+            root.envExecutable,
+            "PATH=" + root.shellPath,
+            "bash",
+            "-c",
+            "set -euo pipefail; "
+                + "export PATH=/run/current-system/sw/bin:/run/wrappers/bin:/usr/bin:/bin; "
+                + "command -v efibootmgr >/dev/null; "
+                + "efibootmgr --bootnext \"$1\"; efibootmgr --verbose",
+            "bootnext",
+            String(entry.bootId).toUpperCase()
         ])
     }
 
@@ -433,12 +568,15 @@ Item {
         const entry = root.pendingCommand
 
         confirmationTimer.stop()
+        restartConfirmationDelay.stop()
+        root.bootNextRestartConfirmationPending = false
         root.pendingCommand = null
 
         if (confirmationPopup.visible)
             confirmationPopup.close()
 
         if (entry && entry.kind === "bootEntry") {
+            root.bootNextAuthorizing = false
             root.hide()
         }
     }
@@ -450,16 +588,46 @@ Item {
             return
 
         confirmationTimer.stop()
+        restartConfirmationDelay.stop()
+        root.bootNextRestartConfirmationPending = false
         root.pendingCommand = null
 
         confirmationPopup.close()
 
         if (entry.kind === "bootEntry") {
-            root.executeBootNext(entry)
+            if (
+                root.bootNextApplied
+                && root.bootNextSelectedId === String(entry.bootId || "").toUpperCase()
+            ) {
+                root.restartWithBootNext(entry)
+            } else {
+                root.executeBootNext(entry)
+            }
             return
         }
 
         root.executeCommand(entry)
+    }
+
+    function restartWithBootNext(entry) {
+        const expectedId = String(entry ? entry.bootId : "").toUpperCase()
+
+        if (
+            !entry
+            || !root.bootNextApplied
+            || root.bootNextSelectedId !== expectedId
+        ) {
+            root.showBootNextFailure("Restart was blocked because BootNext has not been verified.")
+            return
+        }
+
+        root.bootNextAuthorizing = false
+        root.hide()
+
+        Quickshell.execDetached([
+            "systemctl",
+            "reboot"
+        ])
     }
 
 
@@ -747,11 +915,19 @@ Item {
         }
     }
 
+    Timer {
+        id: restartConfirmationDelay
+        interval: 200
+        repeat: false
+
+        onTriggered: root.openRestartConfirmation()
+    }
+
     Item {
         id: launcherPanelBackground
 
         anchors.fill: parent
-        visible: !confirmationPopup.visible
+        visible: !confirmationPopup.visible && !root.bootNextAuthorizing
 
         readonly property real sideCurve: 28
         readonly property real edgeBleed: 2
@@ -830,7 +1006,7 @@ Item {
     Column {
         id: content
 
-        visible: !confirmationPopup.visible
+        visible: !confirmationPopup.visible && !root.bootNextAuthorizing
 
         x: 18
         y: 18
@@ -920,6 +1096,15 @@ Item {
                 root.launchSelected()
                 event.accepted = true
             }
+        }
+
+        Text {
+            width: parent.width
+            visible: root.bootNextMode && root.bootNextError.length > 0
+            text: root.bootNextError
+            color: "#ff9b9b"
+            font.pixelSize: 12
+            wrapMode: Text.Wrap
         }
 
         Item {
@@ -1358,13 +1543,16 @@ Item {
         }
 
         onClosed: {
-            confirmationTimer.stop()
-            root.pendingCommand = null
-            root.confirmationYesSelected = false
+            if (root.bootNextRestartConfirmationPending) {
+                root.openRestartConfirmation()
+                return
+            }
 
-            if (root.open) {
+            confirmationTimer.stop()
+
+            if (root.open && !root.bootNextAuthorizing) {
                 Qt.callLater(function() {
-                    if (root.open && !confirmationPopup.visible)
+                    if (root.open && !confirmationPopup.visible && !root.bootNextAuthorizing)
                         root.focusSearch()
                 })
             }
